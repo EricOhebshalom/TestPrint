@@ -12,7 +12,7 @@ class TestPrintApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       home: Scaffold(
         appBar: AppBar(
-          title: const Text('Zebra QLn420 Bluetooth Print'),
+          title: const Text('Zebra Dynamic Print Client'),
           backgroundColor: Colors.blueGrey,
         ),
         body: const BluetoothPrintDashboard(),
@@ -30,58 +30,77 @@ class BluetoothPrintDashboard extends StatefulWidget {
 
 class _BluetoothPrintDashboardState extends State<BluetoothPrintDashboard> {
   final _bluetoothPlugin = FlutterBlueClassic();
-  String _status = "Pair printer in Android settings first";
+  List<BluetoothDevice> _pairedDevices = [];
+  BluetoothDevice? _selectedDevice;
+  String _status = "Initializing Bluetooth backend...";
   bool _isLoading = false;
 
+  @override
+  void initState() {
+    super.initState();
+    _loadPairedDevices();
+  }
+
+  // Fetch all bonded hardware from the Android OS registry
+  Future<void> _loadPairedDevices() async {
+    try {
+      List<BluetoothDevice> devices = await _bluetoothPlugin.bondedDevices ?? [];
+      BluetoothDevice? smartDefault;
+
+      for (var device in devices) {
+        String name = (device.name ?? "").toLowerCase();
+        // Smart Filter: Auto-detect Zebra naming conventions or serial formats
+        if (name.contains('qln') || name.contains('zebra') || name.startsWith('xx')) {
+          smartDefault = device;
+        }
+      }
+
+      setState(() {
+        _pairedDevices = devices;
+        _selectedDevice = smartDefault ?? (devices.isNotEmpty ? devices.first : null);
+        _status = devices.isEmpty 
+            ? "No paired devices found. Pair your printer in Android Settings."
+            : "Ready to print.";
+      });
+    } catch (e) {
+      setState(() => _status = "Initialization Error: $e");
+    }
+  }
+
   Future<void> _sendBluetoothPrintJob() async {
+    if (_selectedDevice == null) {
+      setState(() => _status = "Error: No target device selected.");
+      return;
+    }
+
     setState(() {
       _isLoading = true;
-      _status = "Scanning paired hardware list...";
+      _status = "Connecting to ${_selectedDevice!.name ?? 'Printer'}...";
     });
 
     const String zplPayload = 
         "^XA"
         "^FO50,50^GB730,200,6^FS" 
-        "^FO100,90^A0N,45,45^FDZEBRA BLUETOOTH OK^FS"
-        "^FO100,150^A0N,30,30^FDDirect Tablet Sideload^FS"
+        "^FO100,90^A0N,45,45^FDZEBRA DYNAMIC OK^FS"
+        "^FO100,150^A0N,30,30^FDFiltered Device Selector^FS"
         "^XZ";
 
     try {
-      // 1. Fetch bonded/paired devices natively (added empty fallback array if null)
-      List<BluetoothDevice> bondedDevices = await _bluetoothPlugin.bondedDevices ?? [];
-      BluetoothDevice? zebraPrinter;
-
-      for (var device in bondedDevices) {
-        if (device.name != null && device.name!.contains('QLn420')) {
-          zebraPrinter = device;
-          break;
-        }
-      }
-
-      if (zebraPrinter == null) {
-        setState(() => _status = "Error: QLn420 not found in paired devices list.\nPlease pair it in Android Bluetooth Settings.");
-        return;
-      }
-
-      setState(() => _status = "Opening RFCOMM Serial Channel...");
-      
-      // 2. Open a nullable BluetoothConnection context safely
-      BluetoothConnection? connection = await _bluetoothPlugin.connect(zebraPrinter.address);
+      // Open connection directly to whatever device is chosen in the UI dropdown
+      BluetoothConnection? connection = await _bluetoothPlugin.connect(_selectedDevice!.address);
       
       if (connection != null && connection.isConnected) {
         setState(() => _status = "Streaming raw ZPL payload over airwaves...");
         
-        // 3. Removed 'await' since writeString returns void synchronously
         connection.writeString(zplPayload);
-        
-        // 4. Gracefully close out active pipeline streams
         await connection.finish();
-        setState(() => _status = "Success! Label data fired over Bluetooth.");
+        
+        setState(() => _status = "Success! Label fired to ${_selectedDevice!.name}.");
       } else {
-        setState(() => _status = "Error: Connection failed or channel is dead.");
+        setState(() => _status = "Error: Connection handshake failed.");
       }
     } catch (e) {
-      setState(() => _status = "Bluetooth Error: $e\n\nEnsure Bluetooth/Location permissions are granted on tablet.");
+      setState(() => _status = "Bluetooth Error: $e");
     } finally {
       setState(() => _isLoading = false);
     }
@@ -95,8 +114,43 @@ class _BluetoothPrintDashboardState extends State<BluetoothPrintDashboard> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const Icon(Icons.bluetooth_audio_rounded, size: 100, color: Colors.blueGrey),
+            const Icon(Icons.print_rounded, size: 80, color: Colors.blueGrey),
+            const SizedBox(height: 20),
+            
+            // Dropdown Selector Label
+            const Text(
+              "Target Bluetooth Device:",
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+            ),
+            const SizedBox(height: 8),
+
+            // Interactive Dropdown Menu Layout
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.blueGrey, width: 1.5),
+              ),
+              child: DropdownButtonHideUnderline(
+                child: DropdownButton<BluetoothDevice>(
+                  value: _selectedDevice,
+                  isExpanded: true,
+                  hint: const Text("Select Printer"),
+                  items: _pairedDevices.map((device) {
+                    return DropdownMenuItem<BluetoothDevice>(
+                      value: device,
+                      child: Text("${device.name ?? 'Unknown'} (${device.address})"),
+                    );
+                  }).toList(),
+                  onChanged: _isLoading ? null : (device) {
+                    setState(() => _selectedDevice = device);
+                  },
+                ),
+              ),
+            ),
             const SizedBox(height: 30),
+
+            // Status Monitor Console
             Container(
               width: double.infinity,
               padding: const EdgeInsets.all(16),
@@ -111,16 +165,33 @@ class _BluetoothPrintDashboardState extends State<BluetoothPrintDashboard> {
                 style: const TextStyle(fontSize: 14, fontFamily: 'monospace'),
               ),
             ),
-            const SizedBox(height: 40),
-            ElevatedButton(
-              onPressed: _isLoading ? null : _sendBluetoothPrintJob,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.blueGrey,
-                padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
-              ),
-              child: _isLoading
-                  ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
-                  : const Text('Fire ZPL via Bluetooth', style: TextStyle(fontSize: 18, color: Colors.white)),
+            const SizedBox(height: 30),
+
+            // Execution Trigger Buttons
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _isLoading ? null : _loadPairedDevices,
+                    icon: const Icon(Icons.refresh),
+                    label: const Text("Refresh List"),
+                    style: OutlinedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 16)),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: _isLoading || _selectedDevice == null ? null : _sendBluetoothPrintJob,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.blueGrey,
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                    ),
+                    child: _isLoading
+                        ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                        : const Text('Print Label', style: TextStyle(fontSize: 16, color: Colors.white)),
+                  ),
+                ),
+              ],
             ),
           ],
         ),
